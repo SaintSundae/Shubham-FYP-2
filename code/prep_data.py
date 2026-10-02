@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Prepare raw financial CSVs into windowed 3D NumPy tensors for a conditional diffusion model.
-
-This script reads the pre-downloaded files from results/index_data/, aligns them on a common
-trading date index, computes log returns and factor transformations, fits a 3-state HMM on VIX,
-and exports train/validation/test tensors plus scaler params.
-"""
+"""Transform aligned market CSVs into train, validation, and test model tensors."""
 
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -43,10 +37,12 @@ ALL_COLUMNS = PRICE_COLUMNS + FACTOR_COLUMNS
 
 
 def normalize_name(value: str) -> str:
+    """Normalize a CSV header for matching despite punctuation or spacing differences."""
     return "".join(ch.lower() for ch in str(value).strip() if ch.isalnum())
 
 
 def coerce_date(value) -> pd.Timestamp:
+    """Parse supported date values and return NaT when a value is not a date."""
     if pd.isna(value):
         return pd.NaT
 
@@ -77,6 +73,7 @@ def coerce_date(value) -> pd.Timestamp:
 
 
 def find_matching_column(columns: Iterable[str], target_aliases: Iterable[str]) -> str:
+    """Find a source column using normalized header names and known aliases."""
     aliases = {normalize_name(alias): alias for alias in target_aliases}
     normalized = {normalize_name(col): col for col in columns}
 
@@ -93,6 +90,7 @@ def find_matching_column(columns: Iterable[str], target_aliases: Iterable[str]) 
 
 
 def load_single_series(path: Path, source_col: str, target_name: str) -> pd.DataFrame:
+    """Load one CSV series, standardize its date index, and rename its value column."""
     if not path.exists():
         raise FileNotFoundError(f"Missing raw file: {path}")
 
@@ -123,6 +121,7 @@ def load_single_series(path: Path, source_col: str, target_name: str) -> pd.Data
 
 
 def load_raw_series() -> Dict[str, pd.DataFrame]:
+    """Load every available input described by FILE_MAP."""
     series: Dict[str, pd.DataFrame] = {}
     for filename, (source_col, target_name) in FILE_MAP.items():
         path = RAW_DIR / filename
@@ -136,6 +135,7 @@ def load_raw_series() -> Dict[str, pd.DataFrame]:
 
 
 def merge_and_filter(series_map: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Align series by date, discard dates before the latest source start, and forward-fill."""
     merged = pd.concat(series_map.values(), axis=1, join="outer", sort=True).sort_index()
     start_dates = {name: df.index.min() for name, df in series_map.items() if len(df) > 0}
     if not start_dates:
@@ -147,6 +147,7 @@ def merge_and_filter(series_map: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def compute_returns_and_factors(merged: pd.DataFrame) -> pd.DataFrame:
+    """Convert prices to log returns and factor percentages to decimal values."""
     returns = merged.copy()
 
     for name in PRICE_COLUMNS:
@@ -163,6 +164,7 @@ def compute_returns_and_factors(merged: pd.DataFrame) -> pd.DataFrame:
 
 
 def fit_hmm_regimes(raw_vix: pd.Series) -> pd.Series:
+    """Fit a three-state VIX HMM and order labels from lowest to highest mean VIX."""
     vix_values = raw_vix.dropna().to_numpy(dtype=float).reshape(-1, 1)
     if len(vix_values) < 3:
         raise ValueError("Not enough valid VIX observations to fit HMM.")
@@ -180,42 +182,8 @@ def fit_hmm_regimes(raw_vix: pd.Series) -> pd.Series:
     return pd.Series(remapped, index=vix_index, name="regime")
 
 
-def split_chronologically(df: pd.DataFrame, regimes: pd.Series) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DatetimeIndex, pd.DatetimeIndex, pd.DatetimeIndex]:
-    feature_cols = [col for col in df.columns if col != "regime"]
-    X = df[feature_cols].to_numpy(dtype=float)
-    y = df["regime"].to_numpy(dtype=int)
-
-    n = len(df)
-    train_end = int(n * 0.70)
-    val_end = int(n * 0.85)
-
-    X_train = X[:train_end]
-    X_val = X[train_end:val_end]
-    X_test = X[val_end:]
-
-    y_train = y[:train_end]
-    y_val = y[train_end:val_end]
-    y_test = y[val_end:]
-
-    dates = df.index
-    train_dates = dates[:train_end]
-    val_dates = dates[train_end:val_end]
-    test_dates = dates[val_end:]
-    return X_train, X_val, X_test, y_train, y_val, y_test, train_dates, val_dates, test_dates
-
-
-def standardize_split(X_train: np.ndarray, X_val: np.ndarray, X_test: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    mu = X_train.mean(axis=0)
-    sigma = X_train.std(axis=0)
-    sigma = np.where(sigma == 0.0, 1.0, sigma)
-
-    X_train_z = (X_train - mu) / sigma
-    X_val_z = (X_val - mu) / sigma
-    X_test_z = (X_test - mu) / sigma
-    return X_train_z, X_val_z, X_test_z, mu, sigma
-
-
 def build_windows(X: np.ndarray, labels: np.ndarray, window_length: int = WINDOW_LENGTH) -> Tuple[np.ndarray, np.ndarray]:
+    """Create feature-by-time windows and label each window from its final day."""
     if X.shape[0] < window_length:
         raise ValueError(f"Not enough observations to build windows of length {window_length}.")
 
@@ -229,6 +197,7 @@ def build_windows(X: np.ndarray, labels: np.ndarray, window_length: int = WINDOW
 
 
 def augment_train_windows(X_train_windows: np.ndarray, C_train: np.ndarray, total_samples: int = BOOTSTRAP_TOTAL) -> Tuple[np.ndarray, np.ndarray]:
+    """Add regime-matched training samples by resampling five-day blocks within windows."""
     if total_samples <= 0:
         return X_train_windows.copy(), C_train.copy()
 
@@ -263,17 +232,20 @@ def augment_train_windows(X_train_windows: np.ndarray, C_train: np.ndarray, tota
 
 
 def save_json(path: Path, payload: dict) -> None:
+    """Write JSON with stable indentation for readable scaler metadata."""
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
 
 def assert_no_invalid(arrays: List[np.ndarray]) -> None:
+    """Stop preprocessing if any exported array contains NaN or infinite values."""
     for arr in arrays:
         if not np.isfinite(arr).all():
             raise ValueError(f"Array contains NaN/Inf values: shape={arr.shape}, dtype={arr.dtype}")
 
 
 def print_split_summary(train_dates: pd.DatetimeIndex, val_dates: pd.DatetimeIndex, test_dates: pd.DatetimeIndex, X_train: np.ndarray, X_val: np.ndarray, X_test: np.ndarray, C_train: np.ndarray, C_val: np.ndarray, C_test: np.ndarray) -> None:
+    """Print the date coverage and sample shapes for each exported split."""
     print("Train date range:", train_dates.min().date(), "->", train_dates.max().date(), "samples=", X_train.shape[0])
     print("Validation date range:", val_dates.min().date(), "->", val_dates.max().date(), "samples=", X_val.shape[0])
     print("Test date range:", test_dates.min().date(), "->", test_dates.max().date(), "samples=", X_test.shape[0])
@@ -286,6 +258,7 @@ def print_split_summary(train_dates: pd.DatetimeIndex, val_dates: pd.DatetimeInd
 
 
 def main() -> None:
+    """Run the full raw-data-to-tensors preprocessing pipeline."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     series_map = load_raw_series()
     merged = merge_and_filter(series_map)
@@ -299,7 +272,7 @@ def main() -> None:
     X_daily = returns[feature_cols].to_numpy(dtype=float)
     labels_daily = returns["regime"].to_numpy(dtype=int)
 
-    # Chronological split on daily returns after filtering.
+    # Split chronologically so validation and test dates follow training dates.
     n = len(returns)
     train_end = int(n * 0.70)
     val_end = int(n * 0.85)

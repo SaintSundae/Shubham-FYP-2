@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the processed financial tensors produced by prep_data.py."""
+"""Check processed tensors for expected structure, labels, and numeric scale."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ PROCESSED_DIR = ROOT / "results" / "processed"
 
 
 def load_arrays() -> dict[str, np.ndarray | dict]:
+    """Load all saved split arrays and the feature-scaler metadata."""
     arrays = {}
     names = [
         "X_train",
@@ -30,12 +31,14 @@ def load_arrays() -> dict[str, np.ndarray | dict]:
 
 
 def assert_no_invalid(arrays: list[np.ndarray]) -> None:
+    """Reject arrays containing NaN or infinite values."""
     for arr in arrays:
         if not np.isfinite(arr).all():
             raise ValueError(f"Array contains NaN or Inf values: shape={arr.shape}, dtype={arr.dtype}")
 
 
 def verify_shapes(arrays: dict[str, np.ndarray | dict]) -> None:
+    """Check tensor dimensions, label alignment, and scaler feature counts."""
     x_train = arrays["X_train"]
     x_val = arrays["X_val"]
     x_test = arrays["X_test"]
@@ -68,6 +71,7 @@ def verify_shapes(arrays: dict[str, np.ndarray | dict]) -> None:
 
 
 def verify_hmm_regimes(arrays: dict[str, np.ndarray | dict]) -> None:
+    """Require all three ordered training regimes and print their sample counts."""
     c_train = arrays["C_train"]
     unique = np.unique(c_train)
     expected = np.array([0, 1, 2], dtype=int)
@@ -88,6 +92,7 @@ def verify_hmm_regimes(arrays: dict[str, np.ndarray | dict]) -> None:
 
 
 def verify_normalization(arrays: dict[str, np.ndarray | dict]) -> None:
+    """Report and bound the global training-window mean and standard deviation."""
     x_train = arrays["X_train"]
     mean = float(x_train.mean())
     std = float(x_train.std())
@@ -100,6 +105,7 @@ def verify_normalization(arrays: dict[str, np.ndarray | dict]) -> None:
 
 
 def main() -> None:
+    """Run every processed-data validation check."""
     print(f"Loading processed arrays from: {PROCESSED_DIR}")
     arrays = load_arrays()
 

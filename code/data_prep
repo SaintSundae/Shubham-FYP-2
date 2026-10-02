@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-
-"""Download market and factor data for the project, skipping already imported files.
-
-Usage:
-    py -3 code\data_prep
-"""
+"""Download missing market and factor CSVs into results/index_data/."""
 
 import io
 import re
@@ -14,8 +9,6 @@ from pathlib import Path
 import pandas as pd
 import requests
 import yfinance as yf
-
-IMPORTED = {"sp500", "nikkei225"}
 
 YAHOO_TICKERS = {
     "Technology Sector": "XLK",
@@ -33,11 +26,12 @@ FRENCH_FACTORS = {
 
 
 def clean_name(value: str) -> str:
+    """Convert a source label to the lowercase filename stem used by the pipeline."""
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
 def download_yahoo_series(symbol: str, label: str, start: str = "2010-01-01") -> pd.DataFrame:
-    """Download daily Yahoo Finance price series and keep the date + close columns."""
+    """Download daily Yahoo Finance prices and return normalized date and close columns."""
     end = pd.Timestamp.today().strftime("%Y-%m-%d")
     last_error = None
 
@@ -74,7 +68,7 @@ def download_yahoo_series(symbol: str, label: str, start: str = "2010-01-01") ->
 
 
 def download_french_factors(start: str = "2010-01-01") -> pd.DataFrame:
-    """Download daily Ken French factor data and select the required factor columns."""
+    """Extract daily market, size, and value factors from the Ken French archive."""
     url = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip"
     last_error = None
 
@@ -132,20 +126,22 @@ def main() -> None:
         output_dir / "s&p500.csv",
         output_dir / "S&P500.csv",
     ]
+    # Remove obsolete duplicate names; the preprocessing pipeline uses sp500.csv.
     for legacy_file in legacy_files:
         if legacy_file.exists():
             legacy_file.unlink()
 
     for feature_name, ticker in YAHOO_TICKERS.items():
         file_stem = clean_name(feature_name)
-        if file_stem in IMPORTED:
+        output_file = output_dir / f"{file_stem}.csv"
+        if output_file.exists():
+            print(f"Skipping existing file: {output_file.name}")
             continue
         try:
             data = download_yahoo_series(ticker, feature_name)
         except Exception as exc:
             print(f"Skipping {feature_name} ({ticker}): {exc}")
             continue
-        output_file = output_dir / f"{file_stem}.csv"
         data.to_csv(output_file, index=False)
         print(f"Saved {len(data)} rows to {output_file}")
 
@@ -157,13 +153,14 @@ def main() -> None:
 
     for feature_name, column_name in FRENCH_FACTORS.items():
         file_stem = clean_name(feature_name)
-        if file_stem in IMPORTED:
+        output_file = output_dir / f"{file_stem}.csv"
+        if output_file.exists():
+            print(f"Skipping existing file: {output_file.name}")
             continue
         if "date" not in french_factors.columns or column_name not in french_factors.columns:
             print(f"Skipping {feature_name}: factor series unavailable")
             continue
         data = french_factors[["date", column_name]].copy()
-        output_file = output_dir / f"{file_stem}.csv"
         data.to_csv(output_file, index=False)
         print(f"Saved {len(data)} rows to {output_file}")
 
