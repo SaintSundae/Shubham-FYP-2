@@ -11,11 +11,13 @@ import requests
 import yfinance as yf
 
 YAHOO_TICKERS = {
-    "Technology Sector": "XLK",
-    "Financials Sector": "XLF",
-    "Energy Sector": "XLE",
-    "USD/JPY Exchange Rate": "JPY=X",
-    "CBOE Volatility Index": "^VIX",
+    "sp500": ("S&P 500", "^GSPC"),
+    "nikkei225": ("Nikkei 225", "^N225"),
+    "technology_sector": ("Technology Sector", "XLK"),
+    "financials_sector": ("Financials Sector", "XLF"),
+    "energy_sector": ("Energy Sector", "XLE"),
+    "usd_jpy_exchange_rate": ("USD/JPY Exchange Rate", "JPY=X"),
+    "cboe_volatility_index": ("CBOE Volatility Index", "^VIX"),
 }
 
 FRENCH_FACTORS = {
@@ -30,41 +32,61 @@ def clean_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
-def download_yahoo_series(symbol: str, label: str, start: str = "2010-01-01") -> pd.DataFrame:
-    """Download daily Yahoo Finance prices and return normalized date and close columns."""
+def download_yahoo_batch(symbols: list[str], start: str = "2010-01-01") -> pd.DataFrame:
+    """Download multiple Yahoo Finance tickers in one grouped request."""
     end = pd.Timestamp.today().strftime("%Y-%m-%d")
     last_error = None
 
     for attempt in range(3):
         try:
             df = yf.download(
-                symbol,
+                tickers=symbols,
                 start=start,
                 end=end,
                 auto_adjust=False,
+                group_by="ticker",
                 progress=False,
-                threads=False,
+                threads=True,
             )
 
             if df.empty:
-                raise ValueError(f"No price data returned for {label} ({symbol})")
-
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            df = df.rename_axis("date").reset_index()
-            df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
-            if "close" not in df.columns:
-                raise ValueError(f"Close column missing for {label} ({symbol})")
-
-            return df[["date", "close"]]
+                raise ValueError("Yahoo Finance returned no price data")
+            return df
         except Exception as exc:  # pragma: no cover - network retry path
             last_error = exc
             if attempt < 2:
                 continue
-            raise ValueError(f"Failed to download {label} ({symbol}) after retries: {exc}") from exc
+            raise ValueError(f"Yahoo Finance batch download failed after retries: {exc}") from exc
 
-    raise ValueError(f"Failed to download {label} ({symbol}) after retries: {last_error}")
+    raise ValueError(f"Yahoo Finance batch download failed after retries: {last_error}")
+
+
+def extract_yahoo_series(downloaded: pd.DataFrame, symbol: str, label: str) -> pd.DataFrame:
+    """Select one ticker from a grouped Yahoo result as date and close columns."""
+    if isinstance(downloaded.columns, pd.MultiIndex):
+        ticker_level = next(
+            (level for level in range(downloaded.columns.nlevels) if symbol in downloaded.columns.get_level_values(level)),
+            None,
+        )
+        if ticker_level is None:
+            raise ValueError(f"No data returned for {label} ({symbol})")
+        df = downloaded.xs(symbol, axis=1, level=ticker_level)
+    else:
+        df = downloaded
+
+    close_column = next(
+        (column for column in df.columns if str(column).strip().lower().replace(" ", "_") == "close"),
+        None,
+    )
+    if close_column is None:
+        raise ValueError(f"Close column missing for {label} ({symbol})")
+
+    return (
+        df[[close_column]]
+        .rename_axis("date")
+        .reset_index()
+        .rename(columns={close_column: "close"})[["date", "close"]]
+    )
 
 
 def download_french_factors(start: str = "2010-01-01") -> pd.DataFrame:
@@ -131,38 +153,54 @@ def main() -> None:
         if legacy_file.exists():
             legacy_file.unlink()
 
-    for feature_name, ticker in YAHOO_TICKERS.items():
-        file_stem = clean_name(feature_name)
+    missing_yahoo = {}
+    for file_stem, (feature_name, ticker) in YAHOO_TICKERS.items():
         output_file = output_dir / f"{file_stem}.csv"
         if output_file.exists():
             print(f"Skipping existing file: {output_file.name}")
             continue
+        missing_yahoo[file_stem] = (feature_name, ticker)
+
+    if missing_yahoo:
         try:
-            data = download_yahoo_series(ticker, feature_name)
+            downloaded = download_yahoo_batch([ticker for _, ticker in missing_yahoo.values()])
         except Exception as exc:
-            print(f"Skipping {feature_name} ({ticker}): {exc}")
-            continue
-        data.to_csv(output_file, index=False)
-        print(f"Saved {len(data)} rows to {output_file}")
+            print(f"Skipping Yahoo Finance series: {exc}")
+        else:
+            for file_stem, (feature_name, ticker) in missing_yahoo.items():
+                output_file = output_dir / f"{file_stem}.csv"
+                try:
+                    data = extract_yahoo_series(downloaded, ticker, feature_name)
+                except Exception as exc:
+                    print(f"Skipping {feature_name} ({ticker}): {exc}")
+                    continue
+                data.to_csv(output_file, index=False)
+                print(f"Saved {len(data)} rows to {output_file}")
 
-    try:
-        french_factors = download_french_factors()
-    except Exception as exc:
-        print(f"Skipping French factors: {exc}")
-        french_factors = pd.DataFrame(columns=["date"])
-
+    missing_factors = {}
     for feature_name, column_name in FRENCH_FACTORS.items():
         file_stem = clean_name(feature_name)
         output_file = output_dir / f"{file_stem}.csv"
         if output_file.exists():
             print(f"Skipping existing file: {output_file.name}")
             continue
-        if "date" not in french_factors.columns or column_name not in french_factors.columns:
-            print(f"Skipping {feature_name}: factor series unavailable")
-            continue
-        data = french_factors[["date", column_name]].copy()
-        data.to_csv(output_file, index=False)
-        print(f"Saved {len(data)} rows to {output_file}")
+        missing_factors[feature_name] = (file_stem, column_name)
+
+    if missing_factors:
+        try:
+            french_factors = download_french_factors()
+        except Exception as exc:
+            print(f"Skipping French factors: {exc}")
+            french_factors = pd.DataFrame(columns=["date"])
+
+        for feature_name, (file_stem, column_name) in missing_factors.items():
+            output_file = output_dir / f"{file_stem}.csv"
+            if "date" not in french_factors.columns or column_name not in french_factors.columns:
+                print(f"Skipping {feature_name}: factor series unavailable")
+                continue
+            data = french_factors[["date", column_name]].copy()
+            data.to_csv(output_file, index=False)
+            print(f"Saved {len(data)} rows to {output_file}")
 
 
 if __name__ == "__main__":

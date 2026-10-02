@@ -4,7 +4,7 @@ This project downloads and prepares financial time-series data for a conditional
 
 ## Project Layout
 
-- `code/data_prep`: downloads missing Yahoo Finance series and Ken French factor data into `results/index_data/`. The S&P 500 and Nikkei 225 CSVs are existing inputs and are not downloaded by this script.
+- `code/data_prep`: downloads all seven Yahoo Finance series, including the S&P 500 and Nikkei 225, together in one batch, plus the three Ken French factors.
 - `code/prep_data.py`: aligns raw CSVs, computes returns, assigns HMM regimes, normalizes features, creates chronological splits and windows, augments training windows, and writes processed arrays.
 - `code/verify_data.py`: checks the saved arrays for expected shapes, valid numeric values, regime labels, and approximate normalization.
 - `results/index_data/`: raw CSV inputs. These are generated or supplied locally and are not required to be committed.
@@ -41,7 +41,7 @@ python code/prep_data.py
 python code/verify_data.py
 ```
 
-`data_prep` skips raw CSV files that already exist, so running it again does not replace existing downloads. It downloads the technology, financials, and energy sector series, USD/JPY, VIX, and the three Ken French factors. The canonical S&P 500 and Nikkei 225 files must already be present in `results/index_data/`.
+On a fresh GitHub checkout, none of the raw CSVs are present because `results/index_data/` is excluded from version control. The first `data_prep` run downloads all seven Yahoo Finance series together in one batch, including the S&P 500 (`^GSPC`) and Nikkei 225 (`^N225`), then downloads the three Ken French factors from their shared archive. Later runs skip CSVs already present, so existing data is not replaced.
 
 `prep_data.py` expects these 10 CSV files in `results/index_data/`:
 
@@ -82,4 +82,4 @@ The exact number of windows depends on the available source dates. The training 
 
 The HMM uses a fixed random state. Training-window augmentation currently uses NumPy's random generator without a fixed seed, so repeated preprocessing runs can produce different augmented training arrays. The raw data sources may also update over time. Keep a copy of source CSVs when exact reproduction is important.
 
-The raw CSVs are ignored by Git and are not committed. Run the downloader for the supported sources and place the canonical S&P 500 and Nikkei 225 CSVs in `results/index_data/` before preprocessing. Generated outputs can be recreated by running the pipeline in order.
+The raw CSVs are ignored by Git and are not committed. On a fresh clone, run `python code/data_prep` first to download all raw files, then run preprocessing and verification in order.
