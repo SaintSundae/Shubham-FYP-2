@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+
+"""Download market and factor data for the project, skipping already imported files.
+
+Usage:
+    py -3 code\data_prep
+"""
+
+import io
+import re
+import zipfile
+from pathlib import Path
+
+import pandas as pd
+import requests
+import yfinance as yf
+
+IMPORTED = {"sp500", "nikkei225"}
+
+YAHOO_TICKERS = {
+    "Technology Sector": "XLK",
+    "Financials Sector": "XLF",
+    "Energy Sector": "XLE",
+    "USD/JPY Exchange Rate": "JPY=X",
+    "CBOE Volatility Index": "^VIX",
+}
+
+FRENCH_FACTORS = {
+    "Market Excess Return": "Mkt-RF",
+    "Size Factor": "SMB",
+    "Value Factor": "HML",
+}
+
+
+def clean_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+
+def download_yahoo_series(symbol: str, label: str, start: str = "2010-01-01") -> pd.DataFrame:
+    """Download daily Yahoo Finance price series and keep the date + close columns."""
+    end = pd.Timestamp.today().strftime("%Y-%m-%d")
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            df = yf.download(
+                symbol,
+                start=start,
+                end=end,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+
+            if df.empty:
+                raise ValueError(f"No price data returned for {label} ({symbol})")
+
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            df = df.rename_axis("date").reset_index()
+            df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
+            if "close" not in df.columns:
+                raise ValueError(f"Close column missing for {label} ({symbol})")
+
+            return df[["date", "close"]]
+        except Exception as exc:  # pragma: no cover - network retry path
+            last_error = exc
+            if attempt < 2:
+                continue
+            raise ValueError(f"Failed to download {label} ({symbol}) after retries: {exc}") from exc
+
+    raise ValueError(f"Failed to download {label} ({symbol}) after retries: {last_error}")
+
+
+def download_french_factors(start: str = "2010-01-01") -> pd.DataFrame:
+    """Download daily Ken French factor data and select the required factor columns."""
+    url = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip"
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+
+            with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                csv_name = next(name for name in archive.namelist() if name.lower().endswith(".csv"))
+                text = archive.read(csv_name).decode("latin1", errors="ignore")
+
+            lines = text.splitlines()
+            header_index = next(
+                (
+                    i
+                    for i, line in enumerate(lines)
+                    if "Mkt-RF" in line and "SMB" in line and "HML" in line
+                ),
+                None,
+            )
+            if header_index is None:
+                raise ValueError("Could not find French factors header in the downloaded data.")
+
+            factor_csv = "\n".join(lines[header_index:])
+            df = pd.read_csv(io.StringIO(factor_csv))
+            df.columns = [str(col).strip() for col in df.columns]
+
+            date_column = next((col for col in df.columns if col in {"Date", "date", "Unnamed: 0"}), None)
+            if date_column is not None:
+                df = df.rename(columns={date_column: "date"})
+            else:
+                df.insert(0, "date", df.iloc[:, 0])
+                df = df.iloc[:, 1:]
+
+            required = [col for col in ["date", "Mkt-RF", "SMB", "HML"] if col in df.columns]
+            if not required:
+                raise ValueError("The Ken French download does not contain the expected factor columns.")
+
+            return df[required].copy()
+        except Exception as exc:  # pragma: no cover - network retry path
+            last_error = exc
+            if attempt < 2:
+                continue
+            raise ValueError(f"Failed to download French factors after retries: {exc}") from exc
+
+    raise ValueError(f"Failed to download French factors after retries: {last_error}")
+
+
+def main() -> None:
+    output_dir = Path(__file__).resolve().parent.parent / "results" / "index_data"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_files = [
+        output_dir / "s&p500.csv",
+        output_dir / "S&P500.csv",
+    ]
+    for legacy_file in legacy_files:
+        if legacy_file.exists():
+            legacy_file.unlink()
+
+    for feature_name, ticker in YAHOO_TICKERS.items():
+        file_stem = clean_name(feature_name)
+        if file_stem in IMPORTED:
+            continue
+        try:
+            data = download_yahoo_series(ticker, feature_name)
+        except Exception as exc:
+            print(f"Skipping {feature_name} ({ticker}): {exc}")
+            continue
+        output_file = output_dir / f"{file_stem}.csv"
+        data.to_csv(output_file, index=False)
+        print(f"Saved {len(data)} rows to {output_file}")
+
+    try:
+        french_factors = download_french_factors()
+    except Exception as exc:
+        print(f"Skipping French factors: {exc}")
+        french_factors = pd.DataFrame(columns=["date"])
+
+    for feature_name, column_name in FRENCH_FACTORS.items():
+        file_stem = clean_name(feature_name)
+        if file_stem in IMPORTED:
+            continue
+        if "date" not in french_factors.columns or column_name not in french_factors.columns:
+            print(f"Skipping {feature_name}: factor series unavailable")
+            continue
+        data = french_factors[["date", column_name]].copy()
+        output_file = output_dir / f"{file_stem}.csv"
+        data.to_csv(output_file, index=False)
+        print(f"Saved {len(data)} rows to {output_file}")
+
+
+if __name__ == "__main__":
+    main()
